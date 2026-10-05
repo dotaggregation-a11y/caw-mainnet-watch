@@ -1,0 +1,87 @@
+# L2: GilgameshCaw/Caw の client/src/abi/deployments.ts の mainnet ブロックに
+#     MintableCaw 以外のアドレスが追加されたら通知する。
+# 自分の（監視用）リポジトリに置く。状態はファイルに持たず、
+# 「直近 LOOKBACK 分前の master」と「現在の master」を比較する（cron の遅延も吸収）。
+name: caw-mainnet-l2-watch
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write    # GITHUB_ISSUE=1 のとき Issue で通知
+  actions: write   # 検知時に caw-mainnet-verify を起動するため
+
+env:
+  TARGET_REPO: GilgameshCaw/Caw
+  FILE: client/src/abi/deployments.ts
+  LOOKBACK: 30 minutes   # cron 遅延対策で間隔より長め。重複通知は「追加分」判定で発生しない
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4      # この監視リポジトリ（notify/ を使う）
+        with: { path: watch }
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: master
+          fetch-depth: 0
+          sparse-checkout: client/src/abi
+          path: caw
+
+      - name: Diff mainnet block
+        id: scan
+        working-directory: caw
+        run: |
+          OLD=$(git rev-list -1 --before="$LOOKBACK ago" master || true)
+          [ -z "$OLD" ] && OLD=$(git rev-list --max-parents=0 master | tail -1)
+          git show "$OLD:$FILE" > /tmp/old.ts 2>/dev/null || : > /tmp/old.ts
+          cp "$FILE" /tmp/new.ts
+          node - <<'EOF' > /tmp/added.txt
+          const fs = require('fs');
+          // mainnet: { ... } を括弧の対応で切り出す（ネストした L1/L2/L2b に対応）
+          const block = (t) => {
+            const i = t.search(/\bmainnet\s*:\s*\{/);
+            if (i < 0) return '';
+            let d = 0, s = t.indexOf('{', i);
+            for (let j = s; j < t.length; j++) {
+              if (t[j] === '{') d++;
+              else if (t[j] === '}' && --d === 0) return t.slice(s, j + 1);
+            }
+            return '';
+          };
+          const addrs = (t) => {
+            const out = new Map();
+            for (const m of block(t).matchAll(/([A-Za-z0-9_]+)\s*:\s*['"`](0x[0-9a-fA-F]{40})['"`]/g))
+              if (m[1] !== 'MintableCaw') out.set(m[1] + '@' + m[2].toLowerCase(), `${m[1]}=${m[2]}`);
+            return out;
+          };
+          const prev = addrs(fs.readFileSync('/tmp/old.ts', 'utf8'));
+          const cur = addrs(fs.readFileSync('/tmp/new.ts', 'utf8'));
+          for (const [k, v] of cur) if (!prev.has(k)) console.log(v);
+          EOF
+          echo "compared $OLD..$(git rev-parse --short HEAD)"; cat /tmp/added.txt
+          [ -s /tmp/added.txt ] && echo "hit=1" >> "$GITHUB_OUTPUT" || true
+
+      - name: Notify
+        if: steps.scan.outputs.hit == '1'
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          LINE_CHANNEL_TOKEN: ${{ secrets.LINE_CHANNEL_TOKEN }}
+          LINE_TO: ${{ secrets.LINE_TO }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_URL: ${{ vars.NTFY_URL }}
+          GITHUB_ISSUE: ${{ vars.GITHUB_ISSUE }}
+          GH_TOKEN: ${{ github.token }}
+        run: watch/notify/notify.sh "🚨 CAW mainnet アドレスが deployments.ts にコミットされました" < /tmp/added.txt
+      - name: Start bytecode verification
+        if: steps.scan.outputs.hit == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run caw-mainnet-verify.yml -R "${{ github.repository }}" -f ref="$(git -C caw rev-parse HEAD)"
