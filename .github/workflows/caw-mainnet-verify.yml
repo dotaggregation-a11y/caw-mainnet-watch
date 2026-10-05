@@ -66,4 +66,4 @@ jobs:
         run: |
           T="✅ CAW mainnet バイトコード検証 OK（@${{ inputs.ref }}）"
           [ "${{ steps.v.outputs.ok }}" = "1" ] || T="🚨 CAW mainnet バイトコード検証で不一致/未確認あり（@${{ inputs.ref }}）"
-          notify/notify.sh "$T" < verify-result.txt
+          bash notify/notify.sh "$T" < verify-result.txt
