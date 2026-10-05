@@ -79,7 +79,7 @@ jobs:
           NTFY_URL: ${{ vars.NTFY_URL }}
           GITHUB_ISSUE: ${{ vars.GITHUB_ISSUE }}
           GH_TOKEN: ${{ github.token }}
-        run: watch/notify/notify.sh "🚨 CAW mainnet アドレスが deployments.ts にコミットされました" < /tmp/added.txt
+               run: bash watch/notify/notify.sh "🚨 CAW mainnet アドレスが deployments.ts にコミットされました" < /tmp/added.txt
       - name: Start bytecode verification
         if: steps.scan.outputs.hit == '1'
         env:
