@@ -1,0 +1,89 @@
+# 準備段階（デプロイ前）の動きを検知する。GilgameshCaw/Caw の master を1時間ごとに確認。
+# 前回確認した SHA を Actions cache に持ち、それ以降の新コミットだけを評価する。
+name: caw-mainnet-prep-watch
+on:
+  schedule:
+    - cron: '7 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write    # GITHUB_ISSUE=1 のとき Issue で通知
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4      # この監視リポジトリ（notify/ を使う）
+        with: { path: watch }
+      - uses: actions/checkout@v4
+        with:
+          repository: GilgameshCaw/Caw
+          ref: master
+          fetch-depth: 0
+          path: caw
+
+      - name: Restore last seen SHA
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: caw-prep-${{ github.run_id }}
+          restore-keys: caw-prep-
+
+      - name: Evaluate new commits
+        id: eval
+        working-directory: caw
+        run: |
+          mkdir -p ../state
+          HEAD=$(git rev-parse HEAD)
+          # 初回は「現在固定されている master」= 97cd13f3a1 を起点にする（それ以降の動きを取りこぼさない）
+          LAST=$(cat ../state/last_sha 2>/dev/null || echo 97cd13f3a1)
+          LAST=$(git rev-parse "$LAST^{commit}")   # 短い SHA を完全な SHA に正規化して比較する
+          git fetch -q --tags
+          TAGS=$(git tag --sort=creatordate | tr '\n' ' ')
+          LAST_TAGS=$(cat ../state/tags 2>/dev/null || true)
+          echo "$HEAD" > ../state/last_sha; echo "$TAGS" > ../state/tags
+
+          OUT=/tmp/msg.txt; : > $OUT
+          # 1) 新しいタグ（v1-final など凍結の合図）
+          NEW_TAGS=$(comm -13 <(echo "$LAST_TAGS" | tr ' ' '\n' | sort) <(echo "$TAGS" | tr ' ' '\n' | sort) | grep . || true)
+          [ -n "$NEW_TAGS" ] && echo "🏷 新タグ: $NEW_TAGS" >> $OUT
+
+          N=$(git rev-list --count "$LAST..$HEAD")
+          if [ "$N" -gt 0 ]; then
+            echo "master に新コミット $N 件（$(git log -1 --format=%cd --date=short $LAST) 以来）" >> $OUT
+            # 2) デプロイ関連ファイルへの変更
+            FILES='solidity/scripts/deploy.js solidity/scripts/lz-dvn-config.js solidity/contracts client/src/abi/deployments.ts client/src/abi/addresses.ts solidity/.deploy-state.json'
+            HITS=$(git log --format='%h %s' "$LAST..$HEAD" -- $FILES)
+            [ -n "$HITS" ] && printf '🔧 デプロイ関連ファイルの変更:\n%s\n' "$HITS" >> $OUT
+            # 3) メッセージにメインネット系キーワード
+            KW=$(git log -i -E --grep='mainnet|launch|etherscan|verif|renounce|dvn|go-live|production' --format='%h %s' "$LAST..$HEAD")
+            [ -n "$KW" ] && printf '🗣 mainnet 系コミット:\n%s\n' "$KW" >> $OUT
+            # 4) PROJECT_BACKLOG.md のチェックボックスが完了に
+            DONE=$(git diff "$LAST" "$HEAD" -- PROJECT_BACKLOG.md | grep -E '^\+\s*- \[[xX]\]' | sed 's/^+\s*//' | cut -c1-140 || true)
+            [ -n "$DONE" ] && printf '✅ バックログ完了:\n%s\n' "$DONE" >> $OUT
+          fi
+          cat $OUT
+          [ -s $OUT ] && echo "hit=1" >> "$GITHUB_OUTPUT" || true
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: caw-prep-${{ github.run_id }}
+
+      - name: Notify
+        if: steps.eval.outputs.hit == '1'
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          LINE_CHANNEL_TOKEN: ${{ secrets.LINE_CHANNEL_TOKEN }}
+          LINE_TO: ${{ secrets.LINE_TO }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_URL: ${{ vars.NTFY_URL }}
+          GITHUB_ISSUE: ${{ vars.GITHUB_ISSUE }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash watch/notify/notify.sh "📋 CAW 準備段階の動き" < /tmp/msg.txt
