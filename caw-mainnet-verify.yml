@@ -1,0 +1,69 @@
+# mainnet にデプロイされたコントラクトが、リポジトリのソースからビルドされたものかを検証する。
+# caw-mainnet-l2-watch がアドレス追加を検知すると自動で起動される。手動実行も可（ref にタグ v2.0.0 等を指定）。
+name: caw-mainnet-verify
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '検証に使う GilgameshCaw/Caw のコミット / タグ'
+        default: master
+
+permissions:
+  contents: read
+  issues: write    # GITHUB_ISSUE=1 のとき Issue で通知
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4          # この監視リポジトリ（verify/ スクリプト）
+      - uses: actions/checkout@v4
+        with:
+          repository: GilgameshCaw/Caw
+          ref: ${{ inputs.ref }}
+          path: caw
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      - name: Install compiler and lockfile-pinned Solidity deps
+        run: |
+          npm i --no-audit --no-fund solc@0.8.30 viem@2
+          # バイトコードは依存のバージョンで変わるため、Caw の package-lock.json と同じ版を入れる
+          PKGS=$(node -e '
+            const l=require("./caw/solidity/package-lock.json").packages;
+            for (const k of Object.keys(l)) {
+              const m=k.match(/^node_modules\/(@openzeppelin\/contracts|@layerzerolabs\/(lz-evm-oapp-v2|lz-evm-protocol-v2|lz-evm-messagelib-v2|oapp-evm|oft-evm)|solidity-bytes-utils)$/);
+              if (m) process.stdout.write(m[1]+"@"+l[k].version+" ");
+            }')
+          mkdir deps && cd deps && npm init -y >/dev/null
+          npm i --no-audit --no-fund --ignore-scripts --legacy-peer-deps $PKGS
+
+      - name: Verify
+        id: v
+        env:
+          L1_RPC: ${{ secrets.L1_RPC }}       # アーカイブ対応 RPC 推奨（作成 tx の探索に使う）
+          L2_RPC: ${{ secrets.L2_RPC }}
+          L2B_RPC: ${{ secrets.L2B_RPC }}
+          ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}   # 任意。あれば作成 tx を即座に特定
+        run: |
+          node verify/run-mainnet.mjs --repo caw --deps deps && echo "ok=1" >> "$GITHUB_OUTPUT" || echo "ok=0" >> "$GITHUB_OUTPUT"
+          { echo '```'; cat verify-result.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify
+        if: always()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          LINE_CHANNEL_TOKEN: ${{ secrets.LINE_CHANNEL_TOKEN }}
+          LINE_TO: ${{ secrets.LINE_TO }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_URL: ${{ vars.NTFY_URL }}
+          GITHUB_ISSUE: ${{ vars.GITHUB_ISSUE }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          T="✅ CAW mainnet バイトコード検証 OK（@${{ inputs.ref }}）"
+          [ "${{ steps.v.outputs.ok }}" = "1" ] || T="🚨 CAW mainnet バイトコード検証で不一致/未確認あり（@${{ inputs.ref }}）"
+          bash notify/notify.sh "$T" < verify-result.txt
