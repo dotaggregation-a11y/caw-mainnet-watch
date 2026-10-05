@@ -1,0 +1,16 @@
+name = "caw-mainnet-watch"
+main = "src/index.js"
+compatibility_date = "2026-10-05"
+
+[triggers]
+crons = ["* * * * *"]   # 1分間隔
+
+[[kv_namespaces]]
+binding = "CAW_KV"
+id = "<npx wrangler kv namespace create CAW_KV の出力を貼る>"
+
+# 通知先は secret で投入（設定したものだけ使われる。複数可）:
+#   npx wrangler secret put DISCORD_WEBHOOK      / SLACK_WEBHOOK
+#   npx wrangler secret put TELEGRAM_BOT_TOKEN   + TELEGRAM_CHAT_ID
+#   npx wrangler secret put LINE_CHANNEL_TOKEN   + LINE_TO
+#   npx wrangler secret put NTFY_TOPIC
